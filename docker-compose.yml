@@ -1,0 +1,100 @@
+services:
+  # ─── Application 1: Go (port 8080) ─────────────────────
+  app-go:
+    build: ./app-go
+    container_name: conquest-app-go
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - conquest-net
+
+  # ─── Application 2: Python/FastAPI (port 8081) ─────────
+  app-python:
+    build: ./app-python
+    container_name: conquest-app-python
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - conquest-net
+
+  # ─── Nginx Reverse Proxy + Cache Layer ─────────────────
+  nginx:
+    build: ./nginx
+    container_name: conquest-nginx
+    ports:
+      - "80:80"    # App Go (cache 10s)
+      - "81:81"    # App Python (cache 1m)
+    depends_on:
+      app-go:
+        condition: service_healthy
+      app-python:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - conquest-net
+
+  # ─── Nginx Exporter (metrics for Prometheus) ───────────
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.1
+    container_name: conquest-nginx-exporter
+    command: ["--nginx.scrape-uri=http://nginx:80/stub_status"]
+    depends_on:
+      - nginx
+    ports:
+      - "9113:9113"
+    restart: unless-stopped
+    networks:
+      - conquest-net
+
+  # ─── Prometheus ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: conquest-prometheus
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - nginx-exporter
+    restart: unless-stopped
+    networks:
+      - conquest-net
+
+  # ─── Grafana ────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: conquest-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=conquest
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - conquest-net
+
+networks:
+  conquest-net:
+    driver: bridge
+
+volumes:
+  grafana-data:
