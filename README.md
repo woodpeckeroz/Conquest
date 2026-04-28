@@ -15,6 +15,7 @@
 - [Observabilidade](#observabilidade)
 - [Diagrama de Arquitetura](#diagrama-de-arquitetura)
 - [Análise e Sugestões de Melhoria](#análise-e-sugestões-de-melhoria)
+- [Fluxo de Atualização](#fluxo-de-atualização)
 
 ---
 
@@ -287,6 +288,178 @@ Acesse em http://localhost:3000 (admin / conquest).
   │   HTTP               ──▶     HTTPS + mTLS       │
   │                                                 │
   └─────────────────────────────────────────────────┘
+```
+
+---
+
+## Fluxo de Atualização
+
+Diagrama completo de como cada componente (código e infra) é atualizado em produção:
+
+```
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │                      FLUXO DE ATUALIZAÇÃO — CONQUEST                        │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   1. CÓDIGO DAS APLICAÇÕES (app-go / app-python)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  Developer        Git             CI/CD              Registry          Produção
+  ─────────       ─────           ──────             ─────────         ────────
+      │               │               │                   │               │
+      │  git push     │               │                   │               │
+      │──────────────▶│               │                   │               │
+      │               │  webhook      │                   │               │
+      │               │──────────────▶│                   │               │
+      │               │               │                   │               │
+      │               │               │  docker build     │               │
+      │               │               │──────────────────▶│               │
+      │               │               │                   │               │
+      │               │               │  docker push      │               │
+      │               │               │──────────────────▶│               │
+      │               │               │                   │  docker pull  │
+      │               │               │  deploy trigger   │──────────────▶│
+      │               │               │──────────────────────────────────▶│
+      │               │               │                   │               │
+      │               │               │               rolling restart     │
+      │               │               │                   │        ┌──────┤
+      │               │               │                   │        │ v2 ↑ │
+      │               │               │                   │        │ v1 ↓ │
+      │               │               │                   │        └──────┘
+
+  Passos (desenvolvimento local):
+    $ vi app-go/main.go              # altera código
+    $ docker compose up --build -d   # rebuild + restart automático
+    → Nginx detecta upstream saudável via healthcheck
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   2. CONFIGURAÇÃO DO NGINX (cache / proxy / headers)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  Editar      │     │  Rebuild     │     │  Validar     │
+  │  nginx.conf  │────▶│  container   │────▶│  cache/hdrs  │
+  └──────────────┘     └──────────────┘     └──────────────┘
+
+  Passos:
+    $ vi nginx/nginx.conf                    # altera config
+    $ docker compose up --build -d nginx     # rebuild só do Nginx
+    $ curl -sI http://localhost:80/time      # valida headers
+
+  ⚠ Mudanças no nginx.conf exigem rebuild do container (config é COPY no build).
+    Cache em disco (/var/cache/nginx/) persiste entre restarts do container.
+    Para limpar cache: docker compose down nginx && docker compose up -d nginx
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   3. PROMETHEUS (scrape targets / regras / alertas)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  Editar      │     │  Restart ou  │     │  Verificar   │
+  │  prometheus  │────▶│  reload      │────▶│  /targets    │
+  │  .yml        │     │              │     │              │
+  └──────────────┘     └──────────────┘     └──────────────┘
+
+  Passos:
+    $ vi observability/prometheus/prometheus.yml   # altera scrape config
+    $ docker compose restart prometheus            # aplica (volume :ro, sem rebuild)
+    → Verificar em http://localhost:9090/targets
+
+  ✔ Volume montado como :ro — não precisa rebuild, apenas restart.
+  ✔ Para hot-reload sem restart: curl -X POST http://localhost:9090/-/reload
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   4. GRAFANA (dashboards / datasources / credenciais)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  Editar      │     │  Restart     │     │  Verificar   │
+  │  provisioning│────▶│  container   │────▶│  :3000       │
+  │  ou .env     │     │              │     │              │
+  └──────────────┘     └──────────────┘     └──────────────┘
+
+  Dashboards (via provisioning — versionado):
+    $ vi observability/grafana/dashboards/infra-overview.json
+    $ docker compose restart grafana
+
+  Dashboards (via UI — efêmero):
+    → Editar direto no Grafana UI (:3000)
+    → ⚠ Perdido ao recriar container (a menos que salvo no volume grafana-data)
+
+  Credenciais:
+    $ vi .env                               # altera GF_SECURITY_ADMIN_PASSWORD
+    $ docker compose up -d grafana          # recria container com nova senha
+
+  ✔ Provisioning (datasources + dashboards) montado como :ro.
+  ✔ Dados persistem no volume grafana-data entre restarts.
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   5. DOCKER COMPOSE (orquestração / novos serviços)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  Editar      │     │  docker      │     │  Verificar   │
+  │  docker-     │────▶│  compose up  │────▶│  docker ps   │
+  │  compose.yml │     │  --build -d  │     │              │
+  └──────────────┘     └──────────────┘     └──────────────┘
+
+  Passos:
+    $ vi docker-compose.yml
+    $ docker compose up --build -d           # aplica diff (só recria o necessário)
+    $ docker compose ps                      # valida estado
+
+  Adicionar novo serviço:
+    1. Criar pasta + Dockerfile + código
+    2. Adicionar service no docker-compose.yml
+    3. Adicionar scrape job no prometheus.yml (se expõe métricas)
+    4. docker compose up --build -d
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   6. DEPENDÊNCIAS (go.mod / requirements.txt)
+  ══════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  Atualizar   │     │  Rebuild     │     │  Testar      │
+  │  deps        │────▶│  imagem      │────▶│  endpoints   │
+  └──────────────┘     └──────────────┘     └──────────────┘
+
+  Go:
+    $ cd app-go
+    $ go get -u github.com/prometheus/client_golang@latest
+    $ go mod tidy
+    $ cd .. && docker compose up --build -d app-go
+
+  Python:
+    $ vi app-python/requirements.txt         # bump versões
+    $ docker compose up --build -d app-python
+
+  ⚠ Sempre pinar versões (ex: fastapi==0.115.0) para builds reproduzíveis.
+
+
+  ══════════════════════════════════════════════════════════════════════════════
+   RESUMO — MÉTODO DE ATUALIZAÇÃO POR COMPONENTE
+  ══════════════════════════════════════════════════════════════════════════════
+
+  ┌─────────────────────┬───────────────┬────────────────────────────────────┐
+  │ Componente          │ Método        │ Comando                            │
+  ├─────────────────────┼───────────────┼────────────────────────────────────┤
+  │ App Go (código)     │ rebuild       │ compose up --build -d app-go       │
+  │ App Python (código) │ rebuild       │ compose up --build -d app-python   │
+  │ Nginx (config)      │ rebuild       │ compose up --build -d nginx        │
+  │ Prometheus (config) │ restart/reload│ compose restart prometheus         │
+  │ Grafana (dashboard) │ restart       │ compose restart grafana            │
+  │ Grafana (senha)     │ recreate      │ compose up -d grafana              │
+  │ Docker Compose      │ up            │ compose up --build -d              │
+  │ Dependências        │ rebuild       │ compose up --build -d <service>    │
+  │ Tudo (from scratch) │ full rebuild  │ compose down -v && compose up -d   │
+  └─────────────────────┴───────────────┴────────────────────────────────────┘
 ```
 
 ---

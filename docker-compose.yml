@@ -3,8 +3,9 @@ services:
   app-go:
     build: ./app-go
     container_name: conquest-app-go
-    ports:
-      - "8080:8080"
+    expose:
+      - "8080"
+    read_only: true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -18,8 +19,11 @@ services:
   app-python:
     build: ./app-python
     container_name: conquest-app-python
-    ports:
-      - "8081:8081"
+    expose:
+      - "8081"
+    read_only: true
+    tmpfs:
+      - /tmp
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
@@ -42,6 +46,11 @@ services:
       app-python:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     networks:
       - conquest-net
 
@@ -52,8 +61,9 @@ services:
     command: ["--nginx.scrape-uri=http://nginx:80/stub_status"]
     depends_on:
       - nginx
-    ports:
-      - "9113:9113"
+    expose:
+      - "9113"
+    read_only: true
     restart: unless-stopped
     networks:
       - conquest-net
@@ -65,7 +75,7 @@ services:
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - nginx-exporter
     restart: unless-stopped
@@ -76,16 +86,16 @@ services:
   grafana:
     image: grafana/grafana:10.4.1
     container_name: conquest-grafana
+    env_file:
+      - .env
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=conquest
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
     restart: unless-stopped
