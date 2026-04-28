@@ -8,8 +8,11 @@ RUN go build -o /server .
 
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
+
 COPY --from=builder /server /server
 
+USER appuser
 EXPOSE 8080
 CMD ["/server"]

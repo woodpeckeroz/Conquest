@@ -1,0 +1,11 @@
+.git
+.gitignore
+README.md
+LICENSE
+*.md
+docker-compose.yml
+observability/
+nginx/
+app-python/
+.env
+.env.example
